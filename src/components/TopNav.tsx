@@ -6,13 +6,15 @@ import {
   PanelLeftClose, 
   PanelLeft, 
   Layers,
-  CheckCircle2,
   AlertTriangle,
-  Radio
+  Radio,
+  LogOut,
+  User as UserIcon
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Note } from '../types';
 import { useNetwork } from '../context/NetworkContext';
+import { useAuth } from '../context/AuthContext';
 
 interface TopNavProps {
   activeNote?: Note;
@@ -31,6 +33,8 @@ export const TopNav: React.FC<TopNavProps> = ({
     toggleKillSwitch,
     isOnline
   } = useNetwork();
+
+  const { user, signOut } = useAuth();
 
   return (
     <header className="h-14 border-b border-slate-200/70 bg-white/80 backdrop-blur-md px-4 flex items-center justify-between z-10 select-none">
@@ -62,8 +66,8 @@ export const TopNav: React.FC<TopNavProps> = ({
         </div>
       </div>
 
-      {/* Right side: Network Status & Dev Kill Switch */}
-      <div className="flex items-center space-x-3">
+      {/* Right side: Network Status, Kill Switch & User Sign Out */}
+      <div className="flex items-center space-x-2.5">
         {/* Network Status Badge */}
         <div
           className={cn(
@@ -150,11 +154,29 @@ export const TopNav: React.FC<TopNavProps> = ({
           </span>
         </button>
 
-        {/* IndexedDB Local Engine status */}
-        <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-100 text-slate-500 text-[11px] font-medium border border-slate-200/50">
-          <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-          <span>Local Engine Active</span>
-        </div>
+        <div className="h-4 w-[1px] bg-slate-200 mx-0.5" />
+
+        {/* User Account & Sign Out Button */}
+        {user && (
+          <div className="flex items-center space-x-1.5">
+            <div 
+              className="hidden md:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-100 text-slate-700 text-xs font-medium max-w-[160px] truncate"
+              title={`Logged in as ${user.email}`}
+            >
+              <UserIcon className="w-3.5 h-3.5 text-slate-400 flex-shrink-0" />
+              <span className="truncate text-[11px]">{user.email}</span>
+            </div>
+
+            <button
+              onClick={() => signOut()}
+              title="Sign Out of Syncron"
+              className="flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl text-xs font-medium text-slate-600 hover:text-rose-600 hover:bg-rose-50 border border-transparent hover:border-rose-200/60 transition-all cursor-pointer shadow-none hover:shadow-soft"
+            >
+              <LogOut className="w-3.5 h-3.5" />
+              <span className="hidden sm:inline">Sign Out</span>
+            </button>
+          </div>
+        )}
       </div>
     </header>
   );

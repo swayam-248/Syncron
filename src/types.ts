@@ -2,6 +2,7 @@ export type SyncStatus = 'synced' | 'pending_push' | 'pending_delete';
 
 export interface Note {
   id: string; // v4 UUID
+  user_id?: string; // Supabase Auth User ID for multi-tenant isolation
   title: string;
   content: string;
   createdAt: number; // timestamp in ms

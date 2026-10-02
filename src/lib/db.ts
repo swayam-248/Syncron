@@ -8,11 +8,21 @@ export class SyncronDatabase extends Dexie {
   constructor() {
     super('SyncronDB');
     
-    // Schema definition for Dexie
-    // id is primary key (string UUID)
-    // Indexes on updatedAt, deletedAt, syncStatus, createdAt
+    // Initial schema (version 1)
     this.version(1).stores({
       notes: 'id, updatedAt, deletedAt, syncStatus, createdAt'
+    });
+
+    // Version 2: Added user_id for multi-tenant account data isolation
+    this.version(2).stores({
+      notes: 'id, user_id, updatedAt, deletedAt, syncStatus, createdAt'
+    }).upgrade((tx) => {
+      // Clean migration for any existing local records
+      return tx.table('notes').toCollection().modify((note) => {
+        if (!note.user_id) {
+          note.user_id = 'local-user';
+        }
+      });
     });
   }
 }
@@ -20,12 +30,13 @@ export class SyncronDatabase extends Dexie {
 export const db = new SyncronDatabase();
 
 /**
- * Helper to create a new note with a v4 UUID
+ * Helper to create a new note with a v4 UUID tied to the authenticated user
  */
-export async function createNote(custom?: Partial<Note>): Promise<Note> {
+export async function createNote(userId: string, custom?: Partial<Note>): Promise<Note> {
   const now = Date.now();
   const newNote: Note = {
     id: uuidv4(),
+    user_id: userId,
     title: custom?.title ?? 'Untitled Note',
     content: custom?.content ?? '# Untitled Note\n\nStart typing here...',
     createdAt: now,
@@ -55,7 +66,7 @@ export async function updateNote(id: string, updates: Partial<Note>): Promise<vo
 
 /**
  * Soft delete (Tombstoning) a note:
- * Sets deletedAt to current timestamp and syncStatus to 'pending_push' without dropping the row from IndexedDB.
+ * Sets deletedAt to current timestamp and syncStatus to 'pending_push'.
  */
 export async function softDeleteNote(id: string): Promise<void> {
   const now = Date.now();
@@ -79,17 +90,18 @@ export async function restoreNote(id: string): Promise<void> {
 }
 
 /**
- * Seed initial sample notes if database is empty on first load
+ * Seed initial sample notes if user has zero notes in database
  */
-export async function seedInitialNotesIfEmpty(): Promise<void> {
-  const count = await db.notes.count();
-  if (count === 0) {
+export async function seedInitialNotesForUser(userId: string): Promise<void> {
+  const userNotesCount = await db.notes.where('user_id').equals(userId).count();
+  if (userNotesCount === 0) {
     const now = Date.now();
     const initialNotes: Note[] = [
       {
         id: uuidv4(),
+        user_id: userId,
         title: '⚡ Welcome to Syncron',
-        content: `# Welcome to Syncron ⚡\n\n**Syncron** is an ultra-fast, local-first Markdown workspace powered by client-side Dexie.js (IndexedDB).\n\n---\n\n### Core Local-First Features:\n- 🔒 **Local Persistence**: Notes are saved directly into your browser's IndexedDB.\n- ⚡ **Zero-Latency**: Instant reactivity via Dexie \`useLiveQuery\`.\n- 🧱 **Tombstone Soft Deletes**: Deleted records are tracked with \`deletedAt\` timestamps for cloud synchronization.\n\n### Try it now:\n- Edit this title or markdown content\n- Click **New Note** to generate a UUID v4 record\n- Test the **Dev Mode: Kill Switch** in the top bar to simulate offline states!`,
+        content: `# Welcome to Syncron ⚡\n\n**Syncron** is an ultra-fast, local-first Markdown workspace secured with Supabase Auth.\n\n---\n\n### Multi-Tenant Local Isolation:\n- 🔒 **User Data Ownership**: All notes are partitioned by your Supabase \`user_id\` in IndexedDB.\n- ⚡ **Zero-Latency**: Instant typing and navigation via reactive \`useLiveQuery\`.\n- 🧱 **Tombstone Sync**: Deletions update \`deletedAt\` timestamps without dropping local history.\n\n### Next Steps:\n- Edit this note directly or click **+ New Note**\n- Toggle the **Dev Mode: Kill Switch** to test simulated offline edits\n- Sign out and switch accounts to verify local data isolation!`,
         createdAt: now - 3600000,
         updatedAt: now,
         syncStatus: 'synced',
@@ -100,20 +112,22 @@ export async function seedInitialNotesIfEmpty(): Promise<void> {
       },
       {
         id: uuidv4(),
-        title: '📐 Distributed Schema & Tombstones',
-        content: `# Distributed Schema & Tombstones 📐\n\nTo allow multi-device sync without conflicts, our Dexie database employs UUID primary keys and soft deletions (tombstones).\n\n\`\`\`typescript\ninterface Note {\n  id: string; // v4 UUID\n  title: string;\n  content: string;\n  createdAt: number;\n  updatedAt: number;\n  syncStatus: 'synced' | 'pending_push' | 'pending_delete';\n  deletedAt: number | null; // Tombstone timestamp\n}\n\`\`\`\n\nWhen a note is deleted, \`deletedAt\` is set to \`Date.now()\` and \`syncStatus: 'pending_push'\`. The record remains in IndexedDB so remote devices can replicate the deletion.`,
+        user_id: userId,
+        title: '📐 Supabase Auth & Dexie Schema',
+        content: `# Supabase Auth & Dexie Schema 📐\n\nNotes are securely associated with authenticated user sessions.\n\n\`\`\`typescript\ninterface Note {\n  id: string; // v4 UUID\n  user_id: string; // Authenticated Supabase User ID\n  title: string;\n  content: string;\n  createdAt: number;\n  updatedAt: number;\n  syncStatus: 'synced' | 'pending_push' | 'pending_delete';\n  deletedAt: number | null;\n}\n\`\`\`\n\nIndexedDB queries are scoped to your \`user_id\`, ensuring multi-tenant privacy on shared client machines.`,
         createdAt: now - 7200000,
         updatedAt: now - 1800000,
         syncStatus: 'synced',
         deletedAt: null,
         icon: '📐',
-        tags: ['Architecture', 'IndexedDB'],
+        tags: ['Architecture', 'Auth'],
         pinned: false,
       },
       {
         id: uuidv4(),
-        title: '💡 Local-First Backlog',
-        content: `# Local-First Backlog 💡\n\n- [x] Day 1: Notion-style UI Shell & Navigation\n- [x] Day 2: Dexie.js IndexedDB schema + useLiveQuery\n- [x] Day 3: Network State Manager, Kill Switch & Tombstoning\n- [ ] Day 4: P2P Conflict Resolution with CRDTs / Remote Sync\n\n*All changes auto-save in real-time.*`,
+        user_id: userId,
+        title: '💡 Local-First Roadmap',
+        content: `# Local-First Roadmap 💡\n\n- [x] Day 1: Notion-style UI Shell & Navigation\n- [x] Day 2: Dexie.js IndexedDB schema + useLiveQuery\n- [x] Day 3: Network State Manager, Kill Switch & Tombstoning\n- [x] Day 4: Supabase Client Infrastructure\n- [x] Day 5: Supabase User Auth & Data Isolation\n- [ ] Day 6: Background Cloud Push/Pull Replication Engine\n\n*Zero-latency editing enabled.*`,
         createdAt: now - 86400000,
         updatedAt: now - 3600000,
         syncStatus: 'synced',

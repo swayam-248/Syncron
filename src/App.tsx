@@ -1,47 +1,59 @@
 import { useState, useEffect } from 'react';
 import { useLiveQuery } from 'dexie-react-hooks';
-import { db, createNote, updateNote, softDeleteNote, restoreNote, seedInitialNotesIfEmpty } from './lib/db';
+import { db, createNote, updateNote, softDeleteNote, restoreNote, seedInitialNotesForUser } from './lib/db';
 import { Note } from './types';
 import { Sidebar } from './components/Sidebar';
 import { TopNav } from './components/TopNav';
 import { Editor } from './components/Editor';
+import { AuthPage } from './components/AuthPage';
 import { NetworkProvider, useNetwork } from './context/NetworkContext';
-import { AlertCircle, WifiOff, Archive, RotateCcw } from 'lucide-react';
+import { AuthProvider, useAuth } from './context/AuthContext';
+import { AlertCircle, WifiOff, Archive, RotateCcw, Loader2 } from 'lucide-react';
 
 function SyncronWorkspace() {
+  const { user } = useAuth();
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
   const [showTombstoneDrawer, setShowTombstoneDrawer] = useState<boolean>(false);
 
   const { effectiveStatus, isKillSwitchActive } = useNetwork();
+  const userId = user?.id || 'anonymous';
 
-  // Initialize and seed Dexie DB on mount if empty
+  // Seed sample notes for this specific user on first login if empty
   useEffect(() => {
-    seedInitialNotesIfEmpty();
-  }, []);
+    if (user?.id) {
+      seedInitialNotesForUser(user.id);
+    }
+  }, [user?.id]);
 
-  // Live Query from Dexie: Strictly filter notes where deletedAt is null, ordered by updatedAt DESC
+  // Live Query from Dexie: Strictly fetch notes for the currently logged-in user where deletedAt is null
   const activeNotes = useLiveQuery(
     async () => {
-      const allNotes = await db.notes
+      if (!userId) return [];
+      const userNotes = await db.notes
+        .where('user_id')
+        .equals(userId)
         .filter((note) => note.deletedAt === null)
         .toArray();
-      return allNotes.sort((a, b) => b.updatedAt - a.updatedAt);
+      return userNotes.sort((a, b) => b.updatedAt - a.updatedAt);
     },
-    [],
+    [userId],
     [] // Fallback
   );
 
-  // Live Query for Tombstoned Notes (for Dev inspection & testing)
+  // Live Query for Tombstoned Notes scoped to this user
   const tombstonedNotes = useLiveQuery(
     async () => {
-      const allNotes = await db.notes
+      if (!userId) return [];
+      const deletedUserNotes = await db.notes
+        .where('user_id')
+        .equals(userId)
         .filter((note) => note.deletedAt !== null)
         .toArray();
-      return allNotes.sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
+      return deletedUserNotes.sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
     },
-    [],
+    [userId],
     []
   );
 
@@ -59,10 +71,11 @@ function SyncronWorkspace() {
   // Find the currently active note from live query
   const activeNote = activeNotes?.find((n) => n.id === selectedNoteId) || null;
 
-  // Handle New Note: Inserts UUID v4 record into Dexie & selects it
+  // Handle New Note: Inserts UUID v4 record tied to user.id into Dexie & selects it
   const handleNewNote = async () => {
+    if (!user?.id) return;
     try {
-      const newNote = await createNote({
+      const newNote = await createNote(user.id, {
         title: 'Untitled Note',
         content: '# Untitled Note\n\nStart typing here...',
         icon: '📝',
@@ -89,7 +102,6 @@ function SyncronWorkspace() {
     if (e) e.stopPropagation();
     try {
       await softDeleteNote(id);
-      // Auto-selection of next note is handled reactively by useLiveQuery effect
     } catch (err) {
       console.error('Failed to soft delete note in Dexie:', err);
     }
@@ -116,11 +128,11 @@ function SyncronWorkspace() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, []);
+  }, [user?.id]);
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-50 font-sans text-slate-900 relative">
-      {/* Sidebar Component with Live Dexie Data */}
+      {/* Sidebar Component with User-Scoped Live Dexie Data */}
       <Sidebar
         notes={activeNotes || []}
         selectedNoteId={selectedNoteId}
@@ -205,7 +217,7 @@ function SyncronWorkspace() {
           </div>
 
           <div className="text-[11px] text-slate-500 py-2">
-            These records still exist in Dexie (<code className="font-mono text-[10px]">SyncronDB.notes</code>) with <code className="font-mono text-[10px]">deletedAt &ne; null</code> for cloud synchronization.
+            These records still exist in Dexie (<code className="font-mono text-[10px]">SyncronDB.notes</code>) with <code className="font-mono text-[10px]">deletedAt &ne; null</code> for user <code className="font-mono text-[10px]">{userId.substring(0, 8)}...</code>
           </div>
 
           <div className="flex-1 overflow-y-auto space-y-2 py-2">
@@ -237,10 +249,36 @@ function SyncronWorkspace() {
   );
 }
 
+function RootApp() {
+  const { user, loading } = useAuth();
+
+  if (loading) {
+    return (
+      <div className="min-h-screen w-screen bg-slate-50 flex flex-col items-center justify-center text-slate-400 space-y-3">
+        <div className="w-10 h-10 rounded-2xl bg-gradient-to-tr from-slate-900 to-slate-700 text-white flex items-center justify-center text-base font-bold shadow-soft">
+          ⚡
+        </div>
+        <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
+          <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
+          <span>Initializing workspace session...</span>
+        </div>
+      </div>
+    );
+  }
+
+  if (!user) {
+    return <AuthPage />;
+  }
+
+  return <SyncronWorkspace />;
+}
+
 export default function App() {
   return (
-    <NetworkProvider>
-      <SyncronWorkspace />
-    </NetworkProvider>
+    <AuthProvider>
+      <NetworkProvider>
+        <RootApp />
+      </NetworkProvider>
+    </AuthProvider>
   );
 }
