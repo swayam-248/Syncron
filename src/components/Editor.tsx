@@ -19,13 +19,15 @@ import {
   Copy,
   Check,
   HardDrive,
-  CloudUpload
+  Trash2,
+  AlertCircle
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
 interface EditorProps {
   note: Note | null;
   onUpdateNote: (updated: Partial<Note>) => void;
+  onDeleteNote: (id: string) => void;
 }
 
 type ViewMode = 'write' | 'preview' | 'split';
@@ -38,12 +40,13 @@ function formatEditorTime(timestamp: number): string {
   return date.toLocaleTimeString([], { hour: '2-digit', minute: '2-digit' });
 }
 
-export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote }) => {
+export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote }) => {
   const [viewMode, setViewMode] = useState<ViewMode>('write');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [copied, setCopied] = useState(false);
   const [newTagInput, setNewTagInput] = useState('');
   const [isAddingTag, setIsAddingTag] = useState(false);
+  const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
   if (!note) {
     return (
@@ -104,6 +107,11 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote }) => {
   const handleRemoveTag = (tagToRemove: string) => {
     const currentTags = note.tags || [];
     onUpdateNote({ tags: currentTags.filter(t => t !== tagToRemove) });
+  };
+
+  const handleDeleteCurrentNote = () => {
+    onDeleteNote(note.id);
+    setShowDeleteConfirm(false);
   };
 
   return (
@@ -179,7 +187,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote }) => {
           </button>
         </div>
 
-        {/* Right Toolbar: View mode toggles & Copy */}
+        {/* Right Toolbar: View mode toggles, Copy & Soft Delete */}
         <div className="flex items-center space-x-2">
           {/* Copy Markdown Button */}
           <button
@@ -238,6 +246,47 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote }) => {
               <span>Split</span>
             </button>
           </div>
+
+          <div className="h-4 w-[1px] bg-slate-200 mx-0.5" />
+
+          {/* Soft Delete (Tombstone) Button */}
+          <div className="relative">
+            <button
+              onClick={() => setShowDeleteConfirm(true)}
+              title="Delete note (Soft delete / Tombstone)"
+              className="p-1.5 rounded-lg text-slate-400 hover:text-rose-600 hover:bg-rose-50 transition-colors cursor-pointer"
+            >
+              <Trash2 className="w-4 h-4" />
+            </button>
+
+            {showDeleteConfirm && (
+              <div className="absolute right-0 top-full mt-2 w-64 p-3 bg-white rounded-2xl shadow-card border border-slate-200 z-30 animate-in fade-in zoom-in-95 duration-150">
+                <div className="flex items-start gap-2 text-xs text-slate-700 mb-3">
+                  <AlertCircle className="w-4 h-4 text-rose-500 flex-shrink-0 mt-0.5" />
+                  <div>
+                    <p className="font-semibold text-slate-900">Soft Delete Note?</p>
+                    <p className="text-[11px] text-slate-500 mt-0.5">
+                      This note will be marked with a tombstone timestamp (<code className="font-mono text-[10px] bg-slate-100 px-1 rounded">deletedAt</code>) for distributed sync.
+                    </p>
+                  </div>
+                </div>
+                <div className="flex items-center justify-end gap-2 text-xs font-medium">
+                  <button
+                    onClick={() => setShowDeleteConfirm(false)}
+                    className="px-2.5 py-1 rounded-lg text-slate-600 hover:bg-slate-100 transition-colors cursor-pointer"
+                  >
+                    Cancel
+                  </button>
+                  <button
+                    onClick={handleDeleteCurrentNote}
+                    className="px-2.5 py-1 rounded-lg bg-rose-600 hover:bg-rose-700 text-white shadow-sm transition-colors cursor-pointer"
+                  >
+                    Delete (Tombstone)
+                  </button>
+                </div>
+              </div>
+            )}
+          </div>
         </div>
       </div>
 
@@ -292,7 +341,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote }) => {
                 {note.syncStatus === 'pending_push' ? (
                   <>
                     <HardDrive className="w-3 h-3 text-amber-600" />
-                    <span className="text-amber-700 font-medium">Saved to Dexie DB</span>
+                    <span className="text-amber-700 font-medium">Local (pending_push)</span>
                   </>
                 ) : (
                   <>

@@ -6,33 +6,31 @@ import {
   PanelLeftClose, 
   PanelLeft, 
   Layers,
-  Sparkles,
   CheckCircle2,
-  AlertTriangle
+  AlertTriangle,
+  Radio
 } from 'lucide-react';
 import { cn } from '../lib/utils';
-import { NetworkStatus, Note } from '../types';
+import { Note } from '../types';
+import { useNetwork } from '../context/NetworkContext';
 
 interface TopNavProps {
   activeNote?: Note;
-  networkStatus: NetworkStatus;
-  devKillSwitchActive: boolean;
   isSidebarOpen: boolean;
   onToggleSidebar: () => void;
-  onToggleKillSwitch: () => void;
-  onToggleNetworkStatus: () => void;
 }
 
 export const TopNav: React.FC<TopNavProps> = ({
   activeNote,
-  networkStatus,
-  devKillSwitchActive,
   isSidebarOpen,
   onToggleSidebar,
-  onToggleKillSwitch,
-  onToggleNetworkStatus,
 }) => {
-  const isOnline = networkStatus === 'online';
+  const { 
+    effectiveStatus, 
+    isKillSwitchActive, 
+    toggleKillSwitch,
+    isOnline
+  } = useNetwork();
 
   return (
     <header className="h-14 border-b border-slate-200/70 bg-white/80 backdrop-blur-md px-4 flex items-center justify-between z-10 select-none">
@@ -67,26 +65,37 @@ export const TopNav: React.FC<TopNavProps> = ({
       {/* Right side: Network Status & Dev Kill Switch */}
       <div className="flex items-center space-x-3">
         {/* Network Status Badge */}
-        <button
-          onClick={onToggleNetworkStatus}
-          title={isOnline ? "Network is Online (Click to simulate toggle)" : "Network is Offline"}
+        <div
           className={cn(
-            "flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200 cursor-pointer shadow-soft border",
+            "flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200 shadow-soft border",
             isOnline
-              ? "bg-emerald-50 text-emerald-700 border-emerald-200/80 hover:bg-emerald-100/70"
-              : "bg-rose-50 text-rose-700 border-rose-200/80 hover:bg-rose-100/70"
+              ? "bg-emerald-50 text-emerald-700 border-emerald-200/80"
+              : effectiveStatus === 'offline_simulated'
+              ? "bg-amber-50 text-amber-700 border-amber-200/80"
+              : "bg-rose-50 text-rose-700 border-rose-200/80"
           )}
+          title={
+            isOnline
+              ? "Connected: Real-time sync engine active"
+              : effectiveStatus === 'offline_simulated'
+              ? "Dev Mode: Network traffic blocked via Kill Switch"
+              : "Device is disconnected from the internet"
+          }
         >
           <span className="relative flex h-2 w-2">
             {isOnline && (
-              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75"></span>
+              <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
             )}
             <span
               className={cn(
                 "relative inline-flex rounded-full h-2 w-2",
-                isOnline ? "bg-emerald-500" : "bg-rose-500"
+                isOnline
+                  ? "bg-emerald-500"
+                  : effectiveStatus === 'offline_simulated'
+                  ? "bg-amber-500"
+                  : "bg-rose-500"
               )}
-            ></span>
+            />
           </span>
           <span className="flex items-center gap-1">
             {isOnline ? (
@@ -94,26 +103,36 @@ export const TopNav: React.FC<TopNavProps> = ({
                 <Wifi className="w-3 h-3" />
                 <span>Online</span>
               </>
+            ) : effectiveStatus === 'offline_simulated' ? (
+              <>
+                <Radio className="w-3 h-3" />
+                <span>Offline (Simulated)</span>
+              </>
             ) : (
               <>
                 <WifiOff className="w-3 h-3" />
-                <span>Offline (Local)</span>
+                <span>Offline (No Connection)</span>
               </>
             )}
           </span>
-        </button>
+        </div>
 
         {/* Dev Mode: Kill Switch Button */}
         <button
-          onClick={onToggleKillSwitch}
+          onClick={toggleKillSwitch}
+          title={
+            isKillSwitchActive
+              ? "Kill switch is active: Click to restore network connection"
+              : "Click to simulate dropped network connection"
+          }
           className={cn(
             "flex items-center space-x-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-all duration-200 cursor-pointer",
-            devKillSwitchActive
+            isKillSwitchActive
               ? "bg-amber-500 text-white border-amber-600 shadow-md ring-2 ring-amber-300/50 animate-pulse"
               : "bg-white text-slate-700 border-slate-200/80 hover:bg-slate-50 hover:border-slate-300 shadow-soft"
           )}
         >
-          {devKillSwitchActive ? (
+          {isKillSwitchActive ? (
             <AlertTriangle className="w-3.5 h-3.5 text-white" />
           ) : (
             <PowerOff className="w-3.5 h-3.5 text-slate-500" />
@@ -122,19 +141,19 @@ export const TopNav: React.FC<TopNavProps> = ({
           <span
             className={cn(
               "text-[10px] px-1.5 py-0.2 rounded font-mono uppercase tracking-wider font-semibold",
-              devKillSwitchActive
+              isKillSwitchActive
                 ? "bg-amber-700 text-white"
                 : "bg-slate-100 text-slate-500"
             )}
           >
-            {devKillSwitchActive ? 'ACTIVE' : 'OFF'}
+            {isKillSwitchActive ? 'ACTIVE' : 'OFF'}
           </span>
         </button>
 
-        {/* Sync Indicator Pill */}
+        {/* IndexedDB Local Engine status */}
         <div className="hidden sm:flex items-center gap-1.5 px-2.5 py-1.5 rounded-xl bg-slate-100 text-slate-500 text-[11px] font-medium border border-slate-200/50">
           <CheckCircle2 className="w-3 h-3 text-emerald-600" />
-          <span>Sync Ready</span>
+          <span>Local Engine Active</span>
         </div>
       </div>
     </header>
