@@ -1,4 +1,5 @@
 import React from 'react';
+import { useQuery } from '@powersync/react';
 import { Note } from '../types';
 import { 
   Plus, 
@@ -17,7 +18,6 @@ import {
 import { cn } from '../lib/utils';
 
 interface SidebarProps {
-  notes: Note[];
   selectedNoteId: string | null;
   searchQuery: string;
   onSelectNote: (id: string) => void;
@@ -25,6 +25,7 @@ interface SidebarProps {
   onSearchChange: (query: string) => void;
   onDeleteNote: (id: string, e: React.MouseEvent) => void;
   isOpen: boolean;
+  notes?: Note[];
 }
 
 // Relative time formatting helper
@@ -45,15 +46,37 @@ function formatTime(timestamp: number): string {
 }
 
 export const Sidebar: React.FC<SidebarProps> = ({
-  notes,
   selectedNoteId,
   searchQuery,
   onSelectNote,
   onNewNote,
   onSearchChange,
   onDeleteNote,
-  isOpen
+  isOpen,
+  notes: fallbackNotes
 }) => {
+  // PowerSync React Hook: Query live WebAssembly SQLite database
+  const { data: rawPowerSyncNotes = [] } = useQuery<any>(
+    'SELECT * FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC'
+  );
+
+  // Map PowerSync records to Note interface, falling back to props if SQLite table is empty
+  const notes: Note[] = rawPowerSyncNotes.length > 0 
+    ? rawPowerSyncNotes.map((r: any) => ({
+        id: r.id,
+        user_id: r.user_id,
+        title: r.title || 'Untitled Note',
+        content: r.content || '',
+        createdAt: Number(r.created_at) || Date.now(),
+        updatedAt: Number(r.updated_at) || Date.now(),
+        syncStatus: r.sync_status || 'synced',
+        deletedAt: r.deleted_at ? Number(r.deleted_at) : null,
+        icon: r.icon || '📝',
+        tags: typeof r.tags === 'string' ? r.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : (r.tags || []),
+        pinned: Boolean(r.pinned),
+      }))
+    : (fallbackNotes || []);
+
   const filteredNotes = notes.filter(note => 
     note.title.toLowerCase().includes(searchQuery.toLowerCase()) ||
     note.content.toLowerCase().includes(searchQuery.toLowerCase()) ||
@@ -78,8 +101,8 @@ export const Sidebar: React.FC<SidebarProps> = ({
               Syncron Workspace
             </h1>
             <span className="text-[11px] text-slate-500 font-medium flex items-center gap-1 mt-0.5">
-              <Database className="w-2.5 h-2.5 text-emerald-600 inline" />
-              IndexedDB • Local-First
+              <Database className="w-2.5 h-2.5 text-blue-600 inline" />
+              PowerSync • WASM SQLite
             </span>
           </div>
         </div>
@@ -189,10 +212,10 @@ export const Sidebar: React.FC<SidebarProps> = ({
       <div className="p-3 border-t border-slate-200/60 bg-slate-50/50">
         <div className="flex items-center justify-between text-[11px] text-slate-500 px-1">
           <div className="flex items-center gap-1.5">
-            <Sparkles className="w-3.5 h-3.5 text-amber-500" />
-            <span className="font-medium">Dexie.js LiveQuery</span>
+            <Sparkles className="w-3.5 h-3.5 text-blue-500" />
+            <span className="font-medium">PowerSync SQLite Engine</span>
           </div>
-          <span className="text-[10px] text-slate-400 font-mono">v4.0 UUIDs</span>
+          <span className="text-[10px] text-slate-400 font-mono">WASM Ready</span>
         </div>
       </div>
     </aside>

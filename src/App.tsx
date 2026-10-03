@@ -1,6 +1,14 @@
-import { useState, useEffect } from 'react';
-import { useLiveQuery } from 'dexie-react-hooks';
-import { db, createNote, updateNote, softDeleteNote, restoreNote, seedInitialNotesForUser } from './lib/db';
+import { useState, useEffect, useMemo } from 'react';
+import { PowerSyncContext, useQuery } from '@powersync/react';
+import { 
+  powersync, 
+  createNote, 
+  updateNote, 
+  softDeleteNote, 
+  restoreNote, 
+  seedInitialNotesForUser 
+} from './lib/powersync';
+import { connector } from './lib/connector';
 import { Note } from './types';
 import { Sidebar } from './components/Sidebar';
 import { TopNav } from './components/TopNav';
@@ -20,58 +28,90 @@ function SyncronWorkspace() {
   const { effectiveStatus, isKillSwitchActive } = useNetwork();
   const userId = user?.id || 'anonymous';
 
-  // Seed sample notes for this specific user on first login if empty
+  // Manage PowerSync sync connection driven by Supabase user session
+  useEffect(() => {
+    if (!user) {
+      powersync.disconnect().catch((err) => {
+        console.warn('[Syncron PowerSync] Disconnect error:', err);
+      });
+      return;
+    }
+
+    // Connect PowerSync WebAssembly SQLite to backend sync rules
+    powersync.connect(connector).catch((err) => {
+      console.info('[Syncron PowerSync] Connection note:', err.message || err);
+    });
+
+    return () => {
+      powersync.disconnect().catch(() => {});
+    };
+  }, [user?.id]);
+
+  // Seed sample notes in PowerSync WebAssembly SQLite on first user login
   useEffect(() => {
     if (user?.id) {
       seedInitialNotesForUser(user.id);
     }
   }, [user?.id]);
 
-  // Live Query from Dexie: Strictly fetch notes for the currently logged-in user where deletedAt is null
-  const activeNotes = useLiveQuery(
-    async () => {
-      if (!userId) return [];
-      const userNotes = await db.notes
-        .where('user_id')
-        .equals(userId)
-        .filter((note) => note.deletedAt === null)
-        .toArray();
-      return userNotes.sort((a, b) => b.updatedAt - a.updatedAt);
-    },
-    [userId],
-    [] // Fallback
+  // PowerSync Live Query: Fetch all non-deleted notes ordered by updated_at descending
+  const { data: rawActiveNotes = [] } = useQuery<any>(
+    'SELECT * FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC'
   );
 
-  // Live Query for Tombstoned Notes scoped to this user
-  const tombstonedNotes = useLiveQuery(
-    async () => {
-      if (!userId) return [];
-      const deletedUserNotes = await db.notes
-        .where('user_id')
-        .equals(userId)
-        .filter((note) => note.deletedAt !== null)
-        .toArray();
-      return deletedUserNotes.sort((a, b) => (b.deletedAt || 0) - (a.deletedAt || 0));
-    },
-    [userId],
-    []
+  // PowerSync Live Query: Fetch all tombstoned notes
+  const { data: rawTombstonedNotes = [] } = useQuery<any>(
+    'SELECT * FROM notes WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC'
   );
+
+  // Map PowerSync records to Note interface
+  const activeNotes: Note[] = useMemo(() => {
+    return rawActiveNotes.map((r: any) => ({
+      id: r.id,
+      user_id: r.user_id,
+      title: r.title || 'Untitled Note',
+      content: r.content || '',
+      createdAt: Number(r.created_at) || Date.now(),
+      updatedAt: Number(r.updated_at) || Date.now(),
+      syncStatus: r.sync_status || 'synced',
+      deletedAt: r.deleted_at ? Number(r.deleted_at) : null,
+      icon: r.icon || '📝',
+      tags: typeof r.tags === 'string' ? r.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : (r.tags || []),
+      pinned: Boolean(r.pinned),
+    }));
+  }, [rawActiveNotes]);
+
+  const tombstonedNotes: Note[] = useMemo(() => {
+    return rawTombstonedNotes.map((r: any) => ({
+      id: r.id,
+      user_id: r.user_id,
+      title: r.title || 'Untitled Note',
+      content: r.content || '',
+      createdAt: Number(r.created_at) || Date.now(),
+      updatedAt: Number(r.updated_at) || Date.now(),
+      syncStatus: r.sync_status || 'synced',
+      deletedAt: r.deleted_at ? Number(r.deleted_at) : null,
+      icon: r.icon || '📝',
+      tags: typeof r.tags === 'string' ? r.tags.split(',').map((t: string) => t.trim()).filter(Boolean) : (r.tags || []),
+      pinned: Boolean(r.pinned),
+    }));
+  }, [rawTombstonedNotes]);
 
   // Auto-select first note if none selected or if selected note was soft-deleted
   useEffect(() => {
-    if (activeNotes && activeNotes.length > 0) {
+    if (activeNotes.length > 0) {
       if (!selectedNoteId || !activeNotes.some((n) => n.id === selectedNoteId)) {
         setSelectedNoteId(activeNotes[0].id);
       }
-    } else if (activeNotes && activeNotes.length === 0) {
+    } else if (activeNotes.length === 0) {
       setSelectedNoteId(null);
     }
   }, [activeNotes, selectedNoteId]);
 
-  // Find the currently active note from live query
-  const activeNote = activeNotes?.find((n) => n.id === selectedNoteId) || null;
+  // Find the currently active note
+  const activeNote = activeNotes.find((n) => n.id === selectedNoteId) || null;
 
-  // Handle New Note: Inserts UUID v4 record tied to user.id into Dexie & selects it
+  // Handle New Note: Executes PowerSync SQL INSERT
   const handleNewNote = async () => {
     if (!user?.id) return;
     try {
@@ -83,27 +123,27 @@ function SyncronWorkspace() {
       });
       setSelectedNoteId(newNote.id);
     } catch (err) {
-      console.error('Failed to create new note in Dexie:', err);
+      console.error('Failed to create new note via PowerSync SQL:', err);
     }
   };
 
-  // Handle Note Auto-Save: Persists changes directly to Dexie with pending_push
+  // Handle Note Auto-Save: Executes PowerSync SQL UPDATE
   const handleUpdateNote = async (updatedFields: Partial<Note>) => {
     if (!selectedNoteId) return;
     try {
       await updateNote(selectedNoteId, updatedFields);
     } catch (err) {
-      console.error('Failed to auto-save note to Dexie:', err);
+      console.error('Failed to auto-save note via PowerSync SQL:', err);
     }
   };
 
-  // Handle Soft Delete (Tombstoning)
+  // Handle Soft Delete: Executes PowerSync SQL UPDATE (deleted_at = ?)
   const handleDeleteNote = async (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
       await softDeleteNote(id);
     } catch (err) {
-      console.error('Failed to soft delete note in Dexie:', err);
+      console.error('Failed to soft delete note via PowerSync SQL:', err);
     }
   };
 
@@ -113,7 +153,7 @@ function SyncronWorkspace() {
       await restoreNote(id);
       setSelectedNoteId(id);
     } catch (err) {
-      console.error('Failed to restore note:', err);
+      console.error('Failed to restore note via PowerSync SQL:', err);
     }
   };
 
@@ -132,9 +172,9 @@ function SyncronWorkspace() {
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-50 font-sans text-slate-900 relative">
-      {/* Sidebar Component with User-Scoped Live Dexie Data */}
+      {/* Sidebar Component with PowerSync SQLite Live Data */}
       <Sidebar
-        notes={activeNotes || []}
+        notes={activeNotes}
         selectedNoteId={selectedNoteId}
         searchQuery={searchQuery}
         onSelectNote={setSelectedNoteId}
@@ -159,7 +199,7 @@ function SyncronWorkspace() {
             <div className="flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
               <span>
-                <strong>Kill Switch Active (Simulated Offline):</strong> Network requests are blocked. Keystrokes & soft-deletes persist locally in IndexedDB with <code className="bg-amber-200/80 px-1 py-0.5 rounded font-mono text-[11px]">syncStatus: 'pending_push'</code>.
+                <strong>Kill Switch Active (Simulated Offline):</strong> PowerSync cloud synchronization paused. Edits persist locally in WebAssembly SQLite with <code className="bg-amber-200/80 px-1 py-0.5 rounded font-mono text-[11px]">sync_status: 'pending_push'</code>.
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -171,7 +211,7 @@ function SyncronWorkspace() {
                 className="flex items-center gap-1 text-[11px] font-medium text-amber-900 underline hover:text-amber-700 cursor-pointer"
               >
                 <Archive className="w-3 h-3" />
-                Tombstones ({tombstonedNotes?.length || 0})
+                Tombstones ({tombstonedNotes.length})
               </button>
             </div>
           </div>
@@ -183,16 +223,16 @@ function SyncronWorkspace() {
             <div className="flex items-center gap-2">
               <WifiOff className="w-4 h-4 text-rose-600 flex-shrink-0" />
               <span>
-                <strong>No Internet Connection:</strong> You are currently offline. Syncron is running in full local-first mode.
+                <strong>No Internet Connection:</strong> You are currently offline. Syncron is operating seamlessly with local WebAssembly SQLite.
               </span>
             </div>
             <span className="text-[10px] bg-rose-200/70 text-rose-900 px-2 py-0.5 rounded font-mono">
-              IndexedDB Active
+              Local SQLite Engine
             </span>
           </div>
         )}
 
-        {/* Distraction-Free Editor Area with Real-Time Dexie Auto-Save & Soft Delete */}
+        {/* Distraction-Free Editor Area with Real-Time PowerSync SQL Auto-Save & Soft Delete */}
         <Editor
           note={activeNote}
           onUpdateNote={handleUpdateNote}
@@ -217,11 +257,11 @@ function SyncronWorkspace() {
           </div>
 
           <div className="text-[11px] text-slate-500 py-2">
-            These records still exist in Dexie (<code className="font-mono text-[10px]">SyncronDB.notes</code>) with <code className="font-mono text-[10px]">deletedAt &ne; null</code> for user <code className="font-mono text-[10px]">{userId.substring(0, 8)}...</code>
+            These records exist in WebAssembly SQLite (<code className="font-mono text-[10px]">notes</code> table) with <code className="font-mono text-[10px]">deleted_at &ne; null</code> for cloud replication.
           </div>
 
           <div className="flex-1 overflow-y-auto space-y-2 py-2">
-            {(!tombstonedNotes || tombstonedNotes.length === 0) ? (
+            {tombstonedNotes.length === 0 ? (
               <p className="text-xs text-slate-400 text-center py-8">No tombstoned notes in database.</p>
             ) : (
               tombstonedNotes.map((note) => (
@@ -229,9 +269,9 @@ function SyncronWorkspace() {
                   <div className="font-medium text-slate-800 truncate">{note.title}</div>
                   <div className="text-[10px] text-slate-400 font-mono">ID: {note.id.substring(0, 8)}...</div>
                   <div className="text-[10px] text-rose-600 font-medium">
-                    deletedAt: {note.deletedAt ? new Date(note.deletedAt).toLocaleTimeString() : 'N/A'}
+                    deleted_at: {note.deletedAt ? new Date(note.deletedAt).toLocaleTimeString() : 'N/A'}
                   </div>
-                  <div className="text-[10px] text-amber-600 font-mono">syncStatus: '{note.syncStatus}'</div>
+                  <div className="text-[10px] text-amber-600 font-mono">sync_status: '{note.syncStatus}'</div>
                   <button
                     onClick={() => handleRestoreNote(note.id)}
                     className="mt-1.5 flex items-center gap-1 text-[11px] font-medium text-emerald-700 bg-emerald-50 hover:bg-emerald-100 border border-emerald-200 px-2 py-0.5 rounded cursor-pointer transition-colors"
@@ -260,7 +300,7 @@ function RootApp() {
         </div>
         <div className="flex items-center gap-2 text-xs font-medium text-slate-600">
           <Loader2 className="w-4 h-4 animate-spin text-slate-400" />
-          <span>Initializing workspace session...</span>
+          <span>Initializing PowerSync workspace session...</span>
         </div>
       </div>
     );
@@ -270,7 +310,11 @@ function RootApp() {
     return <AuthPage />;
   }
 
-  return <SyncronWorkspace />;
+  return (
+    <PowerSyncContext.Provider value={powersync}>
+      <SyncronWorkspace />
+    </PowerSyncContext.Provider>
+  );
 }
 
 export default function App() {
