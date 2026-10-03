@@ -1,4 +1,4 @@
-import React, { useState } from 'react';
+import React, { useState, useEffect, useRef, useCallback } from 'react';
 import { Note } from '../types';
 import { 
   Eye, 
@@ -20,7 +20,8 @@ import {
   Check,
   HardDrive,
   Trash2,
-  AlertCircle
+  AlertCircle,
+  RefreshCw
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 
@@ -41,6 +42,13 @@ function formatEditorTime(timestamp: number): string {
 }
 
 export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote }) => {
+  // Local state for 0ms typing loop (detached from reactive database query while typing)
+  const [localTitle, setLocalTitle] = useState(note?.title || '');
+  const [localContent, setLocalContent] = useState(note?.content || '');
+  const [localIcon, setLocalIcon] = useState(note?.icon || '📝');
+  const [localTags, setLocalTags] = useState<string[]>(note?.tags || []);
+  const [saveStatus, setSaveStatus] = useState<'saved' | 'saving'>('saved');
+
   const [viewMode, setViewMode] = useState<ViewMode>('write');
   const [showEmojiPicker, setShowEmojiPicker] = useState(false);
   const [copied, setCopied] = useState(false);
@@ -48,25 +56,128 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
   const [isAddingTag, setIsAddingTag] = useState(false);
   const [showDeleteConfirm, setShowDeleteConfirm] = useState(false);
 
-  if (!note) {
-    return (
-      <div className="flex-1 h-full flex flex-col items-center justify-center bg-slate-50 text-slate-400 p-8">
-        <div className="w-16 h-16 rounded-2xl bg-white shadow-soft flex items-center justify-center mb-4 text-slate-300 border border-slate-100">
-          <FileText className="w-8 h-8" />
-        </div>
-        <h3 className="text-base font-semibold text-slate-700 mb-1">No note selected</h3>
-        <p className="text-xs text-slate-400 max-w-sm text-center">
-          Select a note from the sidebar or click 'New Note' to create a local UUID document in IndexedDB.
-        </p>
-      </div>
-    );
-  }
+  // Refs to avoid stale closures and manage debounced timers
+  const noteIdRef = useRef<string | null>(note?.id || null);
+  const debounceTimerRef = useRef<ReturnType<typeof setTimeout> | null>(null);
+  const isDirtyRef = useRef(false);
 
-  const wordCount = note.content.trim() ? note.content.trim().split(/\s+/).length : 0;
-  const readingTime = Math.max(1, Math.ceil(wordCount / 200));
+  const localTitleRef = useRef(localTitle);
+  const localContentRef = useRef(localContent);
+  const localIconRef = useRef(localIcon);
+  const localTagsRef = useRef(localTags);
+
+  // Keep refs in sync with state
+  useEffect(() => {
+    localTitleRef.current = localTitle;
+    localContentRef.current = localContent;
+    localIconRef.current = localIcon;
+    localTagsRef.current = localTags;
+  }, [localTitle, localContent, localIcon, localTags]);
+
+  // Flush any pending save immediately
+  const flushSave = useCallback(() => {
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+      debounceTimerRef.current = null;
+    }
+
+    if (isDirtyRef.current && noteIdRef.current) {
+      onUpdateNote({
+        title: localTitleRef.current,
+        content: localContentRef.current,
+        icon: localIconRef.current,
+        tags: localTagsRef.current,
+      });
+      isDirtyRef.current = false;
+      setSaveStatus('saved');
+    }
+  }, [onUpdateNote]);
+
+  // Sync local state when switching notes (or initial load)
+  useEffect(() => {
+    if (note && note.id !== noteIdRef.current) {
+      // Flush previous note edits if any
+      flushSave();
+
+      // Load new note into local state
+      noteIdRef.current = note.id;
+      setLocalTitle(note.title || '');
+      setLocalContent(note.content || '');
+      setLocalIcon(note.icon || '📝');
+      setLocalTags(note.tags || []);
+      setSaveStatus('saved');
+      isDirtyRef.current = false;
+    }
+  }, [note?.id, flushSave]);
+
+  // Clean flush on unmount
+  useEffect(() => {
+    return () => {
+      flushSave();
+    };
+  }, [flushSave]);
+
+  // Debounced save dispatcher (500ms debounce)
+  const scheduleSave = useCallback(() => {
+    isDirtyRef.current = true;
+    setSaveStatus('saving');
+
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+
+    debounceTimerRef.current = setTimeout(() => {
+      flushSave();
+    }, 500);
+  }, [flushSave]);
+
+  // Handlers for local inputs
+  const handleTitleChange = (e: React.ChangeEvent<HTMLInputElement>) => {
+    setLocalTitle(e.target.value);
+    scheduleSave();
+  };
+
+  const handleContentChange = (e: React.ChangeEvent<HTMLTextAreaElement>) => {
+    setLocalContent(e.target.value);
+    scheduleSave();
+  };
+
+  const handleIconSelect = (emoji: string) => {
+    setLocalIcon(emoji);
+    setShowEmojiPicker(false);
+    isDirtyRef.current = true;
+    setSaveStatus('saving');
+    scheduleSave();
+  };
+
+  const handleAddTag = (e: React.KeyboardEvent) => {
+    if (e.key === 'Enter' && newTagInput.trim()) {
+      e.preventDefault();
+      if (!localTags.includes(newTagInput.trim())) {
+        const nextTags = [...localTags, newTagInput.trim()];
+        setLocalTags(nextTags);
+        isDirtyRef.current = true;
+        setSaveStatus('saving');
+        scheduleSave();
+      }
+      setNewTagInput('');
+      setIsAddingTag(false);
+    } else if (e.key === 'Escape') {
+      setIsAddingTag(false);
+      setNewTagInput('');
+    }
+  };
+
+  const handleRemoveTag = (tagToRemove: string) => {
+    const nextTags = localTags.filter(t => t !== tagToRemove);
+    setLocalTags(nextTags);
+    isDirtyRef.current = true;
+    setSaveStatus('saving');
+    scheduleSave();
+  };
 
   const handleCopyMarkdown = () => {
-    navigator.clipboard.writeText(note.content);
+    navigator.clipboard.writeText(localContent);
     setCopied(true);
     setTimeout(() => setCopied(false), 2000);
   };
@@ -81,7 +192,8 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
     const replacement = prefix + (selected || 'text') + suffix;
 
     const newContent = textarea.value.substring(0, start) + replacement + textarea.value.substring(end);
-    onUpdateNote({ content: newContent });
+    setLocalContent(newContent);
+    scheduleSave();
 
     setTimeout(() => {
       textarea.focus();
@@ -89,30 +201,33 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
     }, 0);
   };
 
-  const handleAddTag = (e: React.KeyboardEvent) => {
-    if (e.key === 'Enter' && newTagInput.trim()) {
-      e.preventDefault();
-      const currentTags = note.tags || [];
-      if (!currentTags.includes(newTagInput.trim())) {
-        onUpdateNote({ tags: [...currentTags, newTagInput.trim()] });
-      }
-      setNewTagInput('');
-      setIsAddingTag(false);
-    } else if (e.key === 'Escape') {
-      setIsAddingTag(false);
-      setNewTagInput('');
-    }
-  };
-
-  const handleRemoveTag = (tagToRemove: string) => {
-    const currentTags = note.tags || [];
-    onUpdateNote({ tags: currentTags.filter(t => t !== tagToRemove) });
-  };
-
   const handleDeleteCurrentNote = () => {
-    onDeleteNote(note.id);
+    if (debounceTimerRef.current) {
+      clearTimeout(debounceTimerRef.current);
+    }
+    isDirtyRef.current = false;
+    if (note) {
+      onDeleteNote(note.id);
+    }
     setShowDeleteConfirm(false);
   };
+
+  if (!note) {
+    return (
+      <div className="flex-1 h-full flex flex-col items-center justify-center bg-slate-50 text-slate-400 p-8">
+        <div className="w-16 h-16 rounded-2xl bg-white shadow-soft flex items-center justify-center mb-4 text-slate-300 border border-slate-100">
+          <FileText className="w-8 h-8" />
+        </div>
+        <h3 className="text-base font-semibold text-slate-700 mb-1">No note selected</h3>
+        <p className="text-xs text-slate-400 max-w-sm text-center">
+          Select a note from the sidebar or click 'New Note' to create a local SQLite document.
+        </p>
+      </div>
+    );
+  }
+
+  const wordCount = localContent.trim() ? localContent.trim().split(/\s+/).length : 0;
+  const readingTime = Math.max(1, Math.ceil(wordCount / 200));
 
   return (
     <main className="flex-1 h-full flex flex-col bg-slate-50 overflow-hidden">
@@ -123,14 +238,14 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
           <button
             onClick={() => handleInsertMarkdown('**', '**')}
             title="Bold (Ctrl+B)"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <Bold className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => handleInsertMarkdown('*', '*')}
             title="Italic (Ctrl+I)"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <Italic className="w-3.5 h-3.5" />
           </button>
@@ -138,14 +253,14 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
           <button
             onClick={() => handleInsertMarkdown('# ')}
             title="Heading 1"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <Heading1 className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => handleInsertMarkdown('## ')}
             title="Heading 2"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <Heading2 className="w-3.5 h-3.5" />
           </button>
@@ -153,35 +268,35 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
           <button
             onClick={() => handleInsertMarkdown('- ')}
             title="Bullet list"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <List className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => handleInsertMarkdown('1. ')}
             title="Numbered list"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <ListOrdered className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => handleInsertMarkdown('- [ ] ')}
             title="Task list item"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <CheckSquare className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => handleInsertMarkdown('> ')}
             title="Blockquote"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <Quote className="w-3.5 h-3.5" />
           </button>
           <button
             onClick={() => handleInsertMarkdown('```\n', '\n```')}
             title="Code block"
-            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors"
+            className="p-1.5 rounded-lg text-slate-500 hover:text-slate-900 hover:bg-slate-100 transition-colors cursor-pointer"
           >
             <Code className="w-3.5 h-3.5" />
           </button>
@@ -212,7 +327,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
             <button
               onClick={() => setViewMode('write')}
               className={cn(
-                "flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all",
+                "flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer",
                 viewMode === 'write'
                   ? "bg-white text-slate-900 shadow-sm font-semibold"
                   : "text-slate-500 hover:text-slate-900"
@@ -224,7 +339,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
             <button
               onClick={() => setViewMode('preview')}
               className={cn(
-                "flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all",
+                "flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer",
                 viewMode === 'preview'
                   ? "bg-white text-slate-900 shadow-sm font-semibold"
                   : "text-slate-500 hover:text-slate-900"
@@ -236,7 +351,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
             <button
               onClick={() => setViewMode('split')}
               className={cn(
-                "hidden md:flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all",
+                "hidden md:flex items-center gap-1 px-2.5 py-1 rounded-lg text-xs font-medium transition-all cursor-pointer",
                 viewMode === 'split'
                   ? "bg-white text-slate-900 shadow-sm font-semibold"
                   : "text-slate-500 hover:text-slate-900"
@@ -266,7 +381,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
                   <div>
                     <p className="font-semibold text-slate-900">Soft Delete Note?</p>
                     <p className="text-[11px] text-slate-500 mt-0.5">
-                      This note will be marked with a tombstone timestamp (<code className="font-mono text-[10px] bg-slate-100 px-1 rounded">deletedAt</code>) for distributed sync.
+                      This note will be marked with a tombstone timestamp (<code className="font-mono text-[10px] bg-slate-100 px-1 rounded">deleted_at</code>) for distributed SQLite replication.
                     </p>
                   </div>
                 </div>
@@ -302,7 +417,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
                 className="text-4xl hover:scale-110 active:scale-95 transition-transform p-1 rounded-xl hover:bg-slate-50 cursor-pointer"
                 title="Change icon"
               >
-                {note.icon || '📝'}
+                {localIcon || '📝'}
               </button>
 
               {showEmojiPicker && (
@@ -310,10 +425,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
                   {EMOJI_OPTIONS.map((emoji) => (
                     <button
                       key={emoji}
-                      onClick={() => {
-                        onUpdateNote({ icon: emoji });
-                        setShowEmojiPicker(false);
-                      }}
+                      onClick={() => handleIconSelect(emoji)}
                       className="w-8 h-8 rounded-lg hover:bg-slate-100 flex items-center justify-center text-lg transition-colors cursor-pointer"
                     >
                       {emoji}
@@ -323,12 +435,13 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
               )}
             </div>
 
-            {/* Document Title Input */}
+            {/* Document Title Input (Direct Fast Local State) */}
             <div>
               <input
                 type="text"
-                value={note.title}
-                onChange={(e) => onUpdateNote({ title: e.target.value })}
+                value={localTitle}
+                onChange={handleTitleChange}
+                onBlur={flushSave}
                 placeholder="Untitled document..."
                 className="w-full text-3xl sm:text-4xl font-bold tracking-tight text-slate-900 placeholder:text-slate-300 focus:outline-none bg-transparent"
               />
@@ -336,17 +449,17 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
 
             {/* Metadata & Tag Pills */}
             <div className="flex flex-wrap items-center gap-2 pt-2 border-b border-slate-100 pb-4 text-xs text-slate-500">
-              {/* IndexedDB Auto-save status */}
-              <div className="flex items-center gap-1 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200/50">
-                {note.syncStatus === 'pending_push' ? (
+              {/* SQLite Debounced Auto-save Status */}
+              <div className="flex items-center gap-1.5 bg-slate-50 px-2.5 py-1 rounded-lg border border-slate-200/50">
+                {saveStatus === 'saving' ? (
                   <>
-                    <HardDrive className="w-3 h-3 text-amber-600" />
-                    <span className="text-amber-700 font-medium">Local (pending_push)</span>
+                    <RefreshCw className="w-3 h-3 text-amber-600 animate-spin" />
+                    <span className="text-amber-700 font-medium">Saving...</span>
                   </>
                 ) : (
                   <>
                     <HardDrive className="w-3 h-3 text-emerald-600" />
-                    <span className="text-emerald-700 font-medium">IndexedDB Synced</span>
+                    <span className="text-emerald-700 font-medium">Saved to SQLite</span>
                   </>
                 )}
               </div>
@@ -373,7 +486,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
               </div>
 
               {/* Tags */}
-              {note.tags?.map((tag) => (
+              {localTags.map((tag) => (
                 <span
                   key={tag}
                   className="group inline-flex items-center gap-1 bg-slate-100 hover:bg-slate-200/80 text-slate-700 px-2.5 py-1 rounded-lg transition-colors"
@@ -382,7 +495,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
                   <span>{tag}</span>
                   <button
                     onClick={() => handleRemoveTag(tag)}
-                    className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-500 transition-opacity ml-0.5"
+                    className="opacity-0 group-hover:opacity-100 text-slate-400 hover:text-rose-500 transition-opacity ml-0.5 cursor-pointer"
                   >
                     ×
                   </button>
@@ -396,7 +509,16 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
                   value={newTagInput}
                   onChange={(e) => setNewTagInput(e.target.value)}
                   onKeyDown={handleAddTag}
-                  onBlur={() => setIsAddingTag(false)}
+                  onBlur={() => {
+                    if (newTagInput.trim()) {
+                      if (!localTags.includes(newTagInput.trim())) {
+                        setLocalTags([...localTags, newTagInput.trim()]);
+                        scheduleSave();
+                      }
+                    }
+                    setIsAddingTag(false);
+                    setNewTagInput('');
+                  }}
                   placeholder="tag name + enter"
                   className="bg-slate-50 text-slate-700 text-xs px-2.5 py-1 rounded-lg border border-slate-300 focus:outline-none focus:border-slate-500 w-28"
                 />
@@ -416,8 +538,9 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
             {viewMode === 'write' && (
               <textarea
                 id="syncron-markdown-textarea"
-                value={note.content}
-                onChange={(e) => onUpdateNote({ content: e.target.value })}
+                value={localContent}
+                onChange={handleContentChange}
+                onBlur={flushSave}
                 placeholder="Start typing in Markdown... (e.g. # Heading, - list item, > quote)"
                 className="editor-textarea w-full flex-1 min-h-[450px] bg-transparent text-slate-800 text-base leading-relaxed placeholder:text-slate-300 focus:outline-none resize-none font-sans"
               />
@@ -425,7 +548,7 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
 
             {viewMode === 'preview' && (
               <div className="flex-1 min-h-[450px]">
-                <RenderedMarkdown content={note.content} />
+                <RenderedMarkdown content={localContent} />
               </div>
             )}
 
@@ -433,13 +556,14 @@ export const Editor: React.FC<EditorProps> = ({ note, onUpdateNote, onDeleteNote
               <div className="flex-1 grid grid-cols-2 gap-8 min-h-[450px]">
                 <textarea
                   id="syncron-markdown-textarea"
-                  value={note.content}
-                  onChange={(e) => onUpdateNote({ content: e.target.value })}
+                  value={localContent}
+                  onChange={handleContentChange}
+                  onBlur={flushSave}
                   placeholder="Start typing in Markdown..."
                   className="editor-textarea w-full h-full bg-transparent text-slate-800 text-sm leading-relaxed placeholder:text-slate-300 focus:outline-none resize-none font-mono pr-4 border-r border-slate-100"
                 />
                 <div className="overflow-y-auto pl-2">
-                  <RenderedMarkdown content={note.content} />
+                  <RenderedMarkdown content={localContent} />
                 </div>
               </div>
             )}

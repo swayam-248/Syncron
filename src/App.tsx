@@ -1,5 +1,5 @@
-import { useState, useEffect, useMemo } from 'react';
-import { PowerSyncContext, useQuery } from '@powersync/react';
+import { useState, useEffect, useMemo, useCallback } from 'react';
+import { PowerSyncContext, useQuery, useStatus } from '@powersync/react';
 import { 
   powersync, 
   createNote, 
@@ -14,57 +14,35 @@ import { Sidebar } from './components/Sidebar';
 import { TopNav } from './components/TopNav';
 import { Editor } from './components/Editor';
 import { AuthPage } from './components/AuthPage';
+import { SyncSkeleton } from './components/SyncSkeleton';
 import { NetworkProvider, useNetwork } from './context/NetworkContext';
 import { AuthProvider, useAuth } from './context/AuthContext';
 import { AlertCircle, WifiOff, Archive, RotateCcw, Loader2 } from 'lucide-react';
 
 function SyncronWorkspace() {
+  // 1. Context & State Hooks (All at the absolute top)
   const { user } = useAuth();
+  const { isBrowserOnline, isKillSwitchActive } = useNetwork();
+  const status = useStatus();
+
   const [selectedNoteId, setSelectedNoteId] = useState<string | null>(null);
   const [searchQuery, setSearchQuery] = useState<string>('');
   const [isSidebarOpen, setIsSidebarOpen] = useState<boolean>(true);
   const [showTombstoneDrawer, setShowTombstoneDrawer] = useState<boolean>(false);
+  const [syncTimeoutElapsed, setSyncTimeoutElapsed] = useState<boolean>(false);
 
-  const { effectiveStatus, isKillSwitchActive } = useNetwork();
   const userId = user?.id || 'anonymous';
 
-  // Manage PowerSync sync connection driven by Supabase user session
-  useEffect(() => {
-    if (!user) {
-      powersync.disconnect().catch((err) => {
-        console.warn('[Syncron PowerSync] Disconnect error:', err);
-      });
-      return;
-    }
-
-    // Connect PowerSync WebAssembly SQLite to backend sync rules
-    powersync.connect(connector).catch((err) => {
-      console.info('[Syncron PowerSync] Connection note:', err.message || err);
-    });
-
-    return () => {
-      powersync.disconnect().catch(() => {});
-    };
-  }, [user?.id]);
-
-  // Seed sample notes in PowerSync WebAssembly SQLite on first user login
-  useEffect(() => {
-    if (user?.id) {
-      seedInitialNotesForUser(user.id);
-    }
-  }, [user?.id]);
-
-  // PowerSync Live Query: Fetch all non-deleted notes ordered by updated_at descending
+  // 2. PowerSync Live Queries
   const { data: rawActiveNotes = [] } = useQuery<any>(
     'SELECT * FROM notes WHERE deleted_at IS NULL ORDER BY updated_at DESC'
   );
 
-  // PowerSync Live Query: Fetch all tombstoned notes
   const { data: rawTombstonedNotes = [] } = useQuery<any>(
     'SELECT * FROM notes WHERE deleted_at IS NOT NULL ORDER BY deleted_at DESC'
   );
 
-  // Map PowerSync records to Note interface
+  // 3. Memoized Transformations
   const activeNotes: Note[] = useMemo(() => {
     return rawActiveNotes.map((r: any) => ({
       id: r.id,
@@ -97,22 +75,8 @@ function SyncronWorkspace() {
     }));
   }, [rawTombstonedNotes]);
 
-  // Auto-select first note if none selected or if selected note was soft-deleted
-  useEffect(() => {
-    if (activeNotes.length > 0) {
-      if (!selectedNoteId || !activeNotes.some((n) => n.id === selectedNoteId)) {
-        setSelectedNoteId(activeNotes[0].id);
-      }
-    } else if (activeNotes.length === 0) {
-      setSelectedNoteId(null);
-    }
-  }, [activeNotes, selectedNoteId]);
-
-  // Find the currently active note
-  const activeNote = activeNotes.find((n) => n.id === selectedNoteId) || null;
-
-  // Handle New Note: Executes PowerSync SQL INSERT
-  const handleNewNote = async () => {
+  // 4. Action Handlers
+  const handleNewNote = useCallback(async () => {
     if (!user?.id) return;
     try {
       const newNote = await createNote(user.id, {
@@ -125,37 +89,84 @@ function SyncronWorkspace() {
     } catch (err) {
       console.error('Failed to create new note via PowerSync SQL:', err);
     }
-  };
+  }, [user?.id]);
 
-  // Handle Note Auto-Save: Executes PowerSync SQL UPDATE
-  const handleUpdateNote = async (updatedFields: Partial<Note>) => {
+  const handleUpdateNote = useCallback(async (updatedFields: Partial<Note>) => {
     if (!selectedNoteId) return;
     try {
       await updateNote(selectedNoteId, updatedFields);
     } catch (err) {
       console.error('Failed to auto-save note via PowerSync SQL:', err);
     }
-  };
+  }, [selectedNoteId]);
 
-  // Handle Soft Delete: Executes PowerSync SQL UPDATE (deleted_at = ?)
-  const handleDeleteNote = async (id: string, e?: React.MouseEvent) => {
+  const handleDeleteNote = useCallback(async (id: string, e?: React.MouseEvent) => {
     if (e) e.stopPropagation();
     try {
       await softDeleteNote(id);
     } catch (err) {
       console.error('Failed to soft delete note via PowerSync SQL:', err);
     }
-  };
+  }, []);
 
-  // Handle Restore of Tombstoned Note
-  const handleRestoreNote = async (id: string) => {
+  const handleRestoreNote = useCallback(async (id: string) => {
     try {
       await restoreNote(id);
       setSelectedNoteId(id);
     } catch (err) {
       console.error('Failed to restore note via PowerSync SQL:', err);
     }
-  };
+  }, []);
+
+  // 5. Effects (All effects unconditionally called before any return)
+  // PowerSync Connection Lifecycle
+  useEffect(() => {
+    if (!user) {
+      powersync.disconnect().catch(() => {});
+      return;
+    }
+
+    if (isKillSwitchActive) {
+      powersync.disconnect().catch((err) => {
+        console.warn('[Syncron PowerSync] Kill switch disconnect:', err);
+      });
+    } else {
+      powersync.connect(connector).catch((err) => {
+        console.info('[Syncron PowerSync] Connection note:', err.message || err);
+      });
+    }
+
+    return () => {
+      powersync.disconnect().catch(() => {});
+    };
+  }, [user?.id, isKillSwitchActive]);
+
+  // Graceful offline fallback timeout
+  useEffect(() => {
+    const timer = setTimeout(() => {
+      setSyncTimeoutElapsed(true);
+    }, 2500);
+
+    return () => clearTimeout(timer);
+  }, []);
+
+  // Seed sample notes on first login
+  useEffect(() => {
+    if (user?.id) {
+      seedInitialNotesForUser(user.id);
+    }
+  }, [user?.id]);
+
+  // Auto-selection of active note
+  useEffect(() => {
+    if (activeNotes.length > 0) {
+      if (!selectedNoteId || !activeNotes.some((n) => n.id === selectedNoteId)) {
+        setSelectedNoteId(activeNotes[0].id);
+      }
+    } else if (activeNotes.length === 0) {
+      setSelectedNoteId(null);
+    }
+  }, [activeNotes, selectedNoteId]);
 
   // Global Keyboard Shortcuts (Ctrl+N, Cmd+N)
   useEffect(() => {
@@ -168,7 +179,18 @@ function SyncronWorkspace() {
 
     window.addEventListener('keydown', handleKeyDown);
     return () => window.removeEventListener('keydown', handleKeyDown);
-  }, [user?.id]);
+  }, [handleNewNote]);
+
+  // 6. Conditional Early Returns (AFTER ALL HOOKS ARE CALLED)
+  const hasLocalData = rawActiveNotes.length > 0 || rawTombstonedNotes.length > 0;
+  const isInitialSyncComplete = Boolean(status?.hasSynced) || !isBrowserOnline || isKillSwitchActive || hasLocalData || syncTimeoutElapsed;
+
+  if (!isInitialSyncComplete) {
+    return <SyncSkeleton />;
+  }
+
+  // Find active note for rendering
+  const activeNote = activeNotes.find((n) => n.id === selectedNoteId) || null;
 
   return (
     <div className="flex h-screen w-screen overflow-hidden bg-slate-50 font-sans text-slate-900 relative">
@@ -186,7 +208,7 @@ function SyncronWorkspace() {
 
       {/* Main Workspace Area */}
       <div className="flex-1 flex flex-col h-full min-w-0 overflow-hidden">
-        {/* Top Navigation */}
+        {/* Top Navigation with Real-Time PowerSync Status */}
         <TopNav
           activeNote={activeNote || undefined}
           isSidebarOpen={isSidebarOpen}
@@ -199,7 +221,7 @@ function SyncronWorkspace() {
             <div className="flex items-center gap-2">
               <AlertCircle className="w-4 h-4 text-amber-600 flex-shrink-0" />
               <span>
-                <strong>Kill Switch Active (Simulated Offline):</strong> PowerSync cloud synchronization paused. Edits persist locally in WebAssembly SQLite with <code className="bg-amber-200/80 px-1 py-0.5 rounded font-mono text-[11px]">sync_status: 'pending_push'</code>.
+                <strong>Kill Switch Active (Simulated Offline):</strong> PowerSync connection is disconnected. Edits persist locally in WebAssembly SQLite with <code className="bg-amber-200/80 px-1 py-0.5 rounded font-mono text-[11px]">sync_status: 'pending_push'</code>.
               </span>
             </div>
             <div className="flex items-center gap-2">
@@ -218,12 +240,12 @@ function SyncronWorkspace() {
         )}
 
         {/* Browser Actual Offline Banner (when native connection drops) */}
-        {!isKillSwitchActive && effectiveStatus === 'offline_actual' && (
+        {!isKillSwitchActive && !isBrowserOnline && (
           <div className="bg-rose-500/10 border-b border-rose-300/50 px-4 py-2 flex items-center justify-between text-xs text-rose-950 animate-in fade-in duration-200">
             <div className="flex items-center gap-2">
               <WifiOff className="w-4 h-4 text-rose-600 flex-shrink-0" />
               <span>
-                <strong>No Internet Connection:</strong> You are currently offline. Syncron is operating seamlessly with local WebAssembly SQLite.
+                <strong>No Internet Connection:</strong> You are currently offline. Syncron is running locally with WebAssembly SQLite.
               </span>
             </div>
             <span className="text-[10px] bg-rose-200/70 text-rose-900 px-2 py-0.5 rounded font-mono">

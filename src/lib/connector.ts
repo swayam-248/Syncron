@@ -37,6 +37,10 @@ export class SupabaseConnector implements PowerSyncBackendConnector {
   /**
    * Iterates through the local PowerSync CRUD transaction queue and executes
    * corresponding mutations (INSERT/UPSERT, UPDATE, DELETE) against remote Supabase tables.
+   * 
+   * Note: The Supabase trigger 'tr_handle_note_conflict' evaluates NEW.updated_at vs OLD.updated_at.
+   * If an offline collision occurs, the database cancels the UPDATE and automatically generates
+   * a ' (Conflicted Copy)' record which PowerSync then streams down to the client.
    */
   async uploadData(database: CommonPowerSyncDatabase): Promise<void> {
     const transaction = await database.getNextCrudTransaction();

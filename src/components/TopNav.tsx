@@ -1,4 +1,5 @@
 import React from 'react';
+import { useStatus } from '@powersync/react';
 import { 
   Wifi, 
   WifiOff, 
@@ -9,7 +10,9 @@ import {
   AlertTriangle,
   Radio,
   LogOut,
-  User as UserIcon
+  User as UserIcon,
+  RefreshCw,
+  AlertCircle
 } from 'lucide-react';
 import { cn } from '../lib/utils';
 import { Note } from '../types';
@@ -28,13 +31,18 @@ export const TopNav: React.FC<TopNavProps> = ({
   onToggleSidebar,
 }) => {
   const { 
-    effectiveStatus, 
     isKillSwitchActive, 
     toggleKillSwitch,
-    isOnline
   } = useNetwork();
 
   const { user, signOut } = useAuth();
+  const status = useStatus();
+
+  // Determine PowerSync exact connection state
+  const hasError = Boolean(status?.downloadError || status?.uploadError);
+  const isConnecting = Boolean(status?.connecting || status?.downloading || status?.uploading);
+  const isConnected = Boolean(status?.connected) && !hasError;
+  const isOffline = !isConnected && !isConnecting && !hasError;
 
   return (
     <header className="h-14 border-b border-slate-200/70 bg-white/80 backdrop-blur-md px-4 flex items-center justify-between z-10 select-none">
@@ -66,56 +74,81 @@ export const TopNav: React.FC<TopNavProps> = ({
         </div>
       </div>
 
-      {/* Right side: Network Status, Kill Switch & User Sign Out */}
+      {/* Right side: PowerSync Real-time Status, Kill Switch & User Sign Out */}
       <div className="flex items-center space-x-2.5">
-        {/* Network Status Badge */}
+        {/* Dynamic PowerSync Engine Status Indicator */}
         <div
           className={cn(
             "flex items-center space-x-2 px-3 py-1.5 rounded-full text-xs font-medium transition-all duration-200 shadow-soft border",
-            isOnline
-              ? "bg-emerald-50 text-emerald-700 border-emerald-200/80"
-              : effectiveStatus === 'offline_simulated'
+            isKillSwitchActive
               ? "bg-amber-50 text-amber-700 border-amber-200/80"
-              : "bg-rose-50 text-rose-700 border-rose-200/80"
+              : hasError
+              ? "bg-rose-50 text-rose-700 border-rose-200/80"
+              : isConnected
+              ? "bg-emerald-50 text-emerald-700 border-emerald-200/80"
+              : isConnecting
+              ? "bg-amber-50 text-amber-700 border-amber-200/80"
+              : "bg-slate-100 text-slate-600 border-slate-200/80"
           )}
           title={
-            isOnline
-              ? "Connected: Real-time sync engine active"
-              : effectiveStatus === 'offline_simulated'
-              ? "Dev Mode: Network traffic blocked via Kill Switch"
-              : "Device is disconnected from the internet"
+            isKillSwitchActive
+              ? "Kill Switch Active: PowerSync disconnected"
+              : hasError
+              ? `Sync Error: ${status?.downloadError?.message || status?.uploadError?.message || 'Replication error'}`
+              : isConnected
+              ? "PowerSync Connected: Real-time SQLite replication live"
+              : isConnecting
+              ? "PowerSync Connecting: Syncing changes with cloud..."
+              : "PowerSync Offline: Operating in local WebAssembly SQLite mode"
           }
         >
+          {/* Status Dot / Spinner */}
           <span className="relative flex h-2 w-2">
-            {isOnline && (
+            {isConnected && !isKillSwitchActive && (
               <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-emerald-400 opacity-75" />
             )}
             <span
               className={cn(
                 "relative inline-flex rounded-full h-2 w-2",
-                isOnline
-                  ? "bg-emerald-500"
-                  : effectiveStatus === 'offline_simulated'
+                isKillSwitchActive
                   ? "bg-amber-500"
-                  : "bg-rose-500"
+                  : hasError
+                  ? "bg-rose-500"
+                  : isConnected
+                  ? "bg-emerald-500"
+                  : isConnecting
+                  ? "bg-amber-500"
+                  : "bg-slate-400"
               )}
             />
           </span>
+
+          {/* Status Text */}
           <span className="flex items-center gap-1">
-            {isOnline ? (
-              <>
-                <Wifi className="w-3 h-3" />
-                <span>Online</span>
-              </>
-            ) : effectiveStatus === 'offline_simulated' ? (
+            {isKillSwitchActive ? (
               <>
                 <Radio className="w-3 h-3" />
                 <span>Offline (Simulated)</span>
               </>
+            ) : hasError ? (
+              <>
+                <AlertCircle className="w-3 h-3 text-rose-600" />
+                <span>Sync Error</span>
+              </>
+            ) : isConnected ? (
+              <>
+                <Wifi className="w-3 h-3" />
+                <span>Connected</span>
+              </>
+            ) : isConnecting ? (
+              <>
+                <RefreshCw className="w-3 h-3 animate-spin text-amber-600" />
+                <span>Connecting...</span>
+              </>
             ) : (
               <>
-                <WifiOff className="w-3 h-3" />
-                <span>Offline (No Connection)</span>
+                <WifiOff className="w-3 h-3 text-slate-500" />
+                <span>Offline</span>
               </>
             )}
           </span>
@@ -126,8 +159,8 @@ export const TopNav: React.FC<TopNavProps> = ({
           onClick={toggleKillSwitch}
           title={
             isKillSwitchActive
-              ? "Kill switch is active: Click to restore network connection"
-              : "Click to simulate dropped network connection"
+              ? "Kill switch is active: Click to reconnect PowerSync"
+              : "Click to disconnect PowerSync and simulate offline mode"
           }
           className={cn(
             "flex items-center space-x-2 px-3 py-1.5 rounded-xl text-xs font-medium border transition-all duration-200 cursor-pointer",
